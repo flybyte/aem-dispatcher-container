@@ -1,0 +1,91 @@
+name: Dispatcher Container Image
+run-name: Dispatcher Container Image (${{ inputs.version }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The SDK version to build the image from
+        type: choice
+        options:
+          - stable
+          - latest
+        required: true
+        default: stable
+
+env:
+  REGISTRY: ghcr.io
+  GIT_USER: flybyte
+
+jobs:
+  dispatcher:
+    name: Build Dispatcher Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install qemu package
+        run: |
+          sudo apt update
+          sudo apt install -y qemu-user-static podman buildah
+
+      - name: Container Registry Login
+        run: |
+          echo ${{ secrets.GIT_TOKEN }} | podman login ${{ env.REGISTRY }} -u ${{ env.GIT_USER }} --password-stdin
+
+      - name: Prepare Build Data
+        id: data
+        run: |
+          curl -u "${{ secrets.REPO_USER }}:${{ secrets.REPO_PASS }}" \
+            -o ./versions.json \
+            -L ${{ secrets.REPO_URL }}/aem/versions.json
+          export sdk=$(jq -r '.${{ inputs.version }}.sdk' ./versions.json)
+          echo "sdk=$(echo $sdk)" >> $GITHUB_OUTPUT
+          echo "version=$(echo $sdk | grep -oP 'aem-sdk-\K\d+\.\d+')" >> $GITHUB_OUTPUT
+          echo "date=$(date -u +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+          echo "rev=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Download & Extract AEM SDK Archive
+        id: dispatcher
+        run: |
+          curl -u "${{ secrets.REPO_USER }}:${{ secrets.REPO_PASS }}" \
+               -o ./aem-sdk.zip \
+               -L ${{ secrets.REPO_URL }}${{ steps.data.outputs.sdk }}
+          unzip aem-sdk.zip
+          sh ./aem-sdk-dispatcher-tools-*-unix.sh
+          echo "version=$(find . -name dispatcher-sdk-* | cut -d '-' -f3)" >> $GITHUB_OUTPUT
+
+      - name: Create Adobe Dispatcher Image
+        run: |
+          cd ./dispatcher-sdk-*/lib
+
+          podman load < ./dispatcher-publish-amd64.tar.gz
+          podman tag docker.io/adobe/aem-cs/dispatcher-publish:${{ steps.dispatcher.outputs.version }} \
+                      ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.dispatcher.outputs.version }}-amd64
+          podman push ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.dispatcher.outputs.version }}-amd64
+
+          podman load < ./dispatcher-publish-arm64.tar.gz
+          podman tag docker.io/adobe/aem-cs/dispatcher-publish:${{ steps.dispatcher.outputs.version }} \
+                      ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.dispatcher.outputs.version }}-arm64
+          podman push ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.dispatcher.outputs.version }}-arm64
+
+          podman manifest create ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.dispatcher.outputs.version }} \
+                                 ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.dispatcher.outputs.version }}-amd64 \
+                                 ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.dispatcher.outputs.version }}-arm64 
+          podman manifest create ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ inputs.version }} \
+                                 ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.dispatcher.outputs.version }}-amd64 \
+                                 ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.dispatcher.outputs.version }}-arm64 
+          podman manifest create ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.data.outputs.version }} \
+                                 ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.dispatcher.outputs.version }}-amd64 \
+                                 ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.dispatcher.outputs.version }}-arm64 
+
+          podman manifest push ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.dispatcher.outputs.version }} \
+                               ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.dispatcher.outputs.version }}
+          podman manifest push ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ inputs.version }} \
+                               ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ inputs.version }}
+          podman manifest push ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.data.outputs.version }} \
+                               ${{ env.REGISTRY }}/${{ env.GIT_USER }}/dispatcher:${{ steps.data.outputs.version }}
