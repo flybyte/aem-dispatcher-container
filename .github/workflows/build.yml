@@ -13,6 +13,9 @@ on:
         required: true
         default: stable
 
+permissions:
+  contents: write
+
 env:
   REGISTRY: ghcr.io
   GIT_USER: flybyte
